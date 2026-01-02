@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Tag Arena</title>
+  <style>
+    body { margin:0; background:black; color:white; font-family:Arial; }
+    canvas { display:block; margin:auto; background:#111; }
+  </style>
+</head>
+<body>
+
+<canvas id="game" width="900" height="500"></canvas>
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+let ws;
+let myId = null;
+let isHost = false;
+let gameState = "menu"; // menu | lobby | game | scoreboard
+let partyCode = "";
+let players = [];
+let powerUps = [];
+let camera = { x:0, y:0 };
+let keys = {};
+
+let matchTime = 120;
+
+// DASH & SLIDE
+let dashCooldown = 0;
+let slideTime = 0;
+
+document.addEventListener("keydown", e => keys[e.key] = true);
+document.addEventListener("keyup", e => keys[e.key] = false);
+
+// CONNECT
+function connect(code) {
+  partyCode = code;
+  ws = new WebSocket("ws://localhost:8080");
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type:"join", code }));
+  };
+
+  ws.onmessage = msg => {
+    const data = JSON.parse(msg.data);
+
+    if (data.type === "init") {
+      myId = data.id;
+      isHost = data.host === myId;
+      gameState = "lobby";
+    }
+
+    if (data.type === "state") {
+      players = data.players;
+      powerUps = data.powerUps;
+    }
+
+    if (data.type === "start") {
+      matchTime = 120;
+      gameState = "game";
+    }
+
+    if (data.type === "end") {
+      gameState = "scoreboard";
+    }
+  };
+}
+
+function myPlayer() {
+  return players.find(p => p.id === myId);
+}
+
+// PLAYER MOVEMENT (WITH DASH + SLIDE)
+function movePlayer() {
+  const p = myPlayer();
+  if (!p || p.spectator) return;
+
+  let speed = p.speedBoost > 0 ? 6 : 3;
+
+  // DASH
+  if (keys.Shift && dashCooldown <= 0) {
+    speed = 10;
+    dashCooldown = 60;
+  }
+
+  // SLIDE
+  if (keys.Control && slideTime <= 0) {
+    slideTime = 30;
+  }
+
+  if (slideTime > 0) {
+    speed = 8;
+    slideTime--;
+  }
+
+  if (dashCooldown > 0) dashCooldown--;
+
+  if (keys.w) p.y -= speed;
+  if (keys.s) p.y += speed;
+  if (keys.a) p.x -= speed;
+  if (keys.d) p.x += speed;
+
+  ws.send(JSON.stringify({ type:"move", x:p.x, y:p.y }));
+}
+
+// CAMERA (ARROWS)
+function moveCamera() {
+  if (keys.ArrowUp) camera.y -= 5;
+  if (keys.ArrowDown) camera.y += 5;
+  if (keys.ArrowLeft) camera.x -= 5;
+  if (keys.ArrowRight) camera.x += 5;
+}
+
+// DRAW
+function drawPlayers() {
+  players.forEach(p => {
+    ctx.beginPath();
+    ctx.arc(
+      p.x - camera.x,
+      p.y - camera.y,
+      (p.id === myId && slideTime > 0) ? 8 : 12,
+      0, Math.PI * 2
+    );
+    ctx.fillStyle =
+      p.it ? "red" :
+      p.spectator ? "gray" :
+      "blue";
+    ctx.fill();
+
+    if (p.it) {
+      ctx.strokeStyle = "yellow";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+  });
+}
+
+function drawPowerUps() {
+  powerUps.forEach(p => {
+    ctx.fillStyle = p.type === "speed" ? "lime" : "cyan";
+    ctx.fillRect(p.x - camera.x, p.y - camera.y, 20, 20);
+  });
+}
+
+function drawLobby() {
+  ctx.fillStyle="black";
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle="white";
+  ctx.font="22px Arial";
+  ctx.fillText("Party Code: " + partyCode, 30,40);
+  players.forEach((p,i)=>{
+    ctx.fillText((p.host?"⭐ ":"") + p.id, 50,100+i*30);
+  });
+  if (isHost) ctx.fillText("ENTER = Start | K = Kick", 30,460);
+}
+
+function drawGame() {
+  ctx.fillStyle="black";
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  drawPowerUps();
+  drawPlayers();
+  ctx.fillStyle="white";
+  ctx.fillText("Time: "+matchTime, 20,20);
+  ctx.fillText("WASD Move | SHIFT Dash | CTRL Slide | Arrows Camera", 20,490);
+}
+
+function drawScoreboard() {
+  ctx.fillStyle="black";
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle="white";
+  ctx.font="24px Arial";
+  ctx.fillText("SCOREBOARD", 360,50);
+  players.sort((a,b)=>b.score-a.score).forEach((p,i)=>{
+    ctx.fillText(i+1+". "+p.id+" : "+Math.floor(p.score), 320,120+i*30);
+  });
+  ctx.fillText("ENTER = Lobby", 360,470);
+}
+
+// INPUT
+document.addEventListener("keydown", e => {
+  if (gameState==="menu" && e.key==="Enter") {
+    const code = prompt("Enter Party Password");
+    connect(code);
+  }
+  if (gameState==="lobby" && isHost && e.key==="Enter") {
+    ws.send(JSON.stringify({ type:"start" }));
+  }
+  if (gameState==="lobby" && isHost && e.key==="k") {
+    ws.send(JSON.stringify({ type:"kick" }));
+  }
+  if (gameState==="scoreboard" && e.key==="Enter") {
+    gameState="lobby";
+  }
+});
+
+// TIMER
+setInterval(()=>{
+  if (gameState==="game" && matchTime>0) matchTime--;
+  if (matchTime===0 && gameState==="game") gameState="scoreboard";
+},1000);
+
+// LOOP
+function loop() {
+  moveCamera();
+  movePlayer();
+
+  if (gameState==="menu") {
+    ctx.fillStyle="white";
+    ctx.fillText("PRESS ENTER TO JOIN", 330,250);
+  }
+  if (gameState==="lobby") drawLobby();
+  if (gameState==="game") drawGame();
+  if (gameState==="scoreboard") drawScoreboard();
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
